@@ -245,38 +245,52 @@ resource "aws_security_group_rule" "neptune_allow_bastion" {
 }
 
 # La Instancia EC2
-resource "aws_instance" "bastion_final" {
-  ami           = "ami-0694d931cee176e7d" # Amazon Linux 2023 (eu-west-1)
+# --- 1. BUSCAR LA IMAGEN DE UBUNTU (Automático) ---
+data "aws_ami" "ubuntu" {
+  most_recent = true
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  owners = ["099720109477"] # Canonical (El creador oficial de Ubuntu)
+}
+
+# --- 2. BASTION UBUNTU (El Amigable) ---
+resource "aws_instance" "bastion_ubuntu" {
+  ami           = data.aws_ami.ubuntu.id
   instance_type = "t2.micro"
   subnet_id     = aws_subnet.public.id
   
-  # Sin key_name, todo por contraseña
-
   vpc_security_group_ids = [aws_security_group.bastion_sg.id]
   associate_public_ip_address = true
 
-  # Este script asegura que NADA bloquee la contraseña
+  # Script para Ubuntu: Simple y efectivo
   user_data = <<-EOF
               #!/bin/bash
-              # 1. Establecer la contraseña del usuario (usuario: ec2-user)
-              echo "ec2-user:Crypto2026!" | chpasswd
+              # Cambiamos la contraseña al usuario 'ubuntu'
+              echo "ubuntu:Crypto2026!" | chpasswd
               
-              # 2. Crear un archivo de configuración prioritario que fuerce la aceptación
-              # El numero 99 asegura que se carga el último y manda sobre los demás
-              echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/99-force-login.conf
-              echo "KbdInteractiveAuthentication yes" >> /etc/ssh/sshd_config.d/99-force-login.conf
+              # Habilitamos login por contraseña
+              sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+              sed -i 's/KbdInteractiveAuthentication no/KbdInteractiveAuthentication yes/g' /etc/ssh/sshd_config
               
-              # 3. Reiniciar el servicio SSH
-              systemctl restart sshd
+              # Reiniciamos SSH
+              systemctl restart ssh
               EOF
 
-  tags = { Name = "Crypto-Bastion-Final" }
+  tags = { Name = "Crypto-Bastion-Ubuntu" }
 }
 
-
-# --- ACTUALIZA EL OUTPUT ---
+# --- 3. ACTUALIZA EL OUTPUT ---
 output "bastion_ip" {
-  value = aws_instance.bastion_final.public_ip
+  value = aws_instance.bastion_ubuntu.public_ip
 }
 
 output "neptune_endpoint" {
