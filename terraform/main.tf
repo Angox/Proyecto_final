@@ -1,5 +1,5 @@
 provider "aws" {
-  region = "us-east-1" # Cambia según tu preferencia
+  region = "eu-west-1" # Cambia según tu preferencia
 }
 
 # --- 1. RED (VPC) ---
@@ -19,7 +19,7 @@ resource "aws_internet_gateway" "igw" {
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.1.0/24"
-  availability_zone       = "us-east-1a"
+  availability_zone       = "eu-west-1a"
   map_public_ip_on_launch = true
 }
 
@@ -27,12 +27,12 @@ resource "aws_subnet" "public" {
 resource "aws_subnet" "private_a" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.2.0/24"
-  availability_zone = "us-east-1a"
+  availability_zone = "eu-west-1a"
 }
 resource "aws_subnet" "private_b" { # Neptune necesita 2 AZs min
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.3.0/24"
-  availability_zone = "us-east-1b"
+  availability_zone = "eu-west-1b"
 }
 
 # NAT Gateway (Coste $$$): Permite a Lambda salir a internet
