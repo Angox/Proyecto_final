@@ -245,24 +245,22 @@ resource "aws_security_group_rule" "neptune_allow_bastion" {
 }
 
 # La Instancia EC2
-resource "aws_instance" "bastion" {
+resource "aws_instance" "bastion_v2" {
   ami           = "ami-0694d931cee176e7d" # Amazon Linux 2023 (eu-west-1)
-  instance_type = "t2.micro"              # Capa gratuita
+  instance_type = "t2.micro"
   subnet_id     = aws_subnet.public.id
   
-  # IMPORTANTE: El nombre de la llave que creaste en el paso 1
+  # ASEGURATE QUE ESTO COINCIDE EXACTAMENTE CON EL NOMBRE EN AWS CONSOLA -> KEY PAIRS
+  # Si en AWS se llama "Crypto-Key", aquí debe poner "Crypto-Key"
   key_name      = "crypto-key" 
 
   vpc_security_group_ids = [aws_security_group.bastion_sg.id]
   associate_public_ip_address = true
 
-  tags = { Name = "Crypto-Bastion" }
+  tags = { Name = "Crypto-Bastion-V2" }
 }
 
-# Output para saber la IP rápido
+# --- ACTUALIZA TAMBIÉN EL OUTPUT AL FINAL DEL ARCHIVO ---
 output "bastion_ip" {
-  value = aws_instance.bastion.public_ip
-}
-output "neptune_endpoint" {
-  value = aws_neptune_cluster.default.endpoint
+  value = aws_instance.bastion_v2.public_ip # Nota el _v2 aqui tambien
 }
