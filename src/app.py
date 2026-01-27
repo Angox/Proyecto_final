@@ -3,7 +3,6 @@ import json
 import ccxt
 import pandas as pd
 import boto3
-import time
 from io import StringIO
 from datetime import datetime
 from gremlin_python.driver import client, serializer
@@ -11,7 +10,7 @@ from gremlin_python.driver import client, serializer
 # Configuración
 NEPTUNE_ENDPOINT = os.environ.get('NEPTUNE_ENDPOINT')
 S3_BUCKET = os.environ.get('S3_BUCKET')
-CSV_FILENAME = "market_leaders_history.csv" # Nombre del archivo único
+CSV_FILENAME = "market_leaders_history.csv"
 TIMEFRAME = '1m'
 LIMIT = 1000 
 
@@ -29,7 +28,6 @@ def get_binance_data():
         return pd.DataFrame()
 
     symbols = [s for s in markets if s.endswith('/USDC')]
-    # Top 15 para tener más posibilidades de encontrar relaciones
     selected_symbols = symbols[:15] 
     
     data = {}
@@ -54,7 +52,6 @@ def get_binance_data():
     if not data: return pd.DataFrame()
 
     full_df = pd.DataFrame(data)
-    # Rellenar y limpiar
     full_df = full_df.ffill().dropna()
     
     return full_df
@@ -62,7 +59,7 @@ def get_binance_data():
 def calculate_correlations(df):
     results = []
     columns = df.columns
-    THRESHOLD = 0.65 # Subimos un poco la exigencia
+    THRESHOLD = 0.65
     
     for asset_a in columns:
         for asset_b in columns:
@@ -91,6 +88,9 @@ def calculate_correlations(df):
     return results
 
 def update_neptune(relationships):
+    """
+    Actualiza el grafo asegurando que SOLO exista una arista por par.
+    """
     if not relationships:
         print("No hay relaciones para guardar.")
         return
@@ -100,32 +100,38 @@ def update_neptune(relationships):
     try:
         g_client = client.Client(f'wss://{NEPTUNE_ENDPOINT}:8182/gremlin', 'g')
         
+        # 1. Asegurar Vértices (Monedas)
         unique_coins = set()
         for rel in relationships:
             unique_coins.add(rel['leader'])
             unique_coins.add(rel['follower'])
             
-        # 1. Asegurar Vértices
         for coin in unique_coins:
             g_client.submit(f"""
             g.V().has('coin', 'symbol', '{coin}')
              .fold().coalesce(unfold(), addV('coin').property('symbol', '{coin}'))
             """).all().result()
             
-        # 2. Insertar/Actualizar Aristas
+        # 2. Insertar Aristas (Limpiando primero las viejas)
+        # ESTO SOLUCIONA LOS DUPLICADOS EN LA BASE DE DATOS
         for rel in relationships:
-            query_edge = f"""
+            # Primero: Borrar cualquier arista existente 'leads' entre A y B
+            drop_query = f"""
+            g.V().has('coin', 'symbol', '{rel['leader']}')
+             .outE('leads').where(inV().has('coin', 'symbol', '{rel['follower']}')).drop()
+            """
+            g_client.submit(drop_query).all().result()
+            
+            # Segundo: Crear la nueva arista limpia
+            add_query = f"""
             g.V().has('coin', 'symbol', '{rel['leader']}').as('a')
              .V().has('coin', 'symbol', '{rel['follower']}').as('b')
-             .coalesce(
-                outE('leads').where(inV().as('b')), 
-                addE('leads').from('a').to('b')
-             )
+             .addE('leads').from('a').to('b')
              .property('correlation', {rel['correlation']})
              .property('lag', {rel['lag_minutes']})
              .property('updated_at', '{datetime.now().isoformat()}')
             """
-            g_client.submit(query_edge).all().result()
+            g_client.submit(add_query).all().result()
 
     except Exception as e:
         print(f"ERROR NEPTUNE UPDATE: {e}")
@@ -134,7 +140,7 @@ def update_neptune(relationships):
 
 def get_leaders_analytics():
     """
-    Consulta Gremlin avanzada para obtener estadísticas detalladas por Líder
+    Obtiene analíticas y DEDUPLICA los resultados antes de generar el CSV.
     """
     print("--- CONSULTANDO ANALÍTICAS EN NEPTUNE ---")
     g_client = None
@@ -143,10 +149,6 @@ def get_leaders_analytics():
     try:
         g_client = client.Client(f'wss://{NEPTUNE_ENDPOINT}:8182/gremlin', 'g')
         
-        # CONSULTA AVANZADA:
-        # Para cada moneda que tiene aristas salientes ('leads'):
-        # 1. Agrupa por símbolo del líder
-        # 2. Proyecta una lista de sus seguidores con sus propiedades (corr, lag)
         query = """
         g.V().where(outE('leads')).project('leader', 'followers_info')
          .by('symbol')
@@ -158,27 +160,38 @@ def get_leaders_analytics():
         """
         
         results = g_client.submit(query).all().result()
-        
         timestamp = datetime.now().isoformat()
         
         for r in results:
             leader = r['leader']
-            followers = r['followers_info']
-            count = len(followers)
+            followers_raw = r['followers_info']
             
+            # --- CORRECCIÓN CRÍTICA DE DUPLICADOS EN PYTHON ---
+            # Usamos un diccionario para quedarnos solo con UN registro por seguidor.
+            # La clave es el simbolo, así eliminamos duplicados visuales inmediatamente.
+            unique_followers_dict = {}
+            for f in followers_raw:
+                unique_followers_dict[f['symbol']] = f
+            
+            # Recuperamos la lista limpia
+            followers_clean = list(unique_followers_dict.values())
+            
+            count = len(followers_clean)
+            if count == 0: continue
+
             # Calcular promedios
-            avg_corr = sum([abs(f['corr']) for f in followers]) / count if count > 0 else 0
-            avg_lag = sum([f['lag'] for f in followers]) / count if count > 0 else 0
+            avg_corr = sum([abs(f['corr']) for f in followers_clean]) / count
+            avg_lag = sum([f['lag'] for f in followers_clean]) / count
             
-            # Crear lista legible: "ETH(0.85), SOL(0.70)"
-            followers_str = "; ".join([f"{f['symbol']}({f['corr']:.2f})" for f in followers])
+            # Crear lista legible
+            followers_str = "; ".join([f"{f['symbol']}({f['corr']:.2f})" for f in followers_clean])
             
             leaders_data.append({
                 'timestamp': timestamp,
                 'leader': leader,
                 'follower_count': count,
                 'avg_correlation': round(avg_corr, 4),
-                'avg_lag_minutes': round(avg_lag, 2), # Positivo: Líder va X min por delante
+                'avg_lag_minutes': round(avg_lag, 2),
                 'followers_list': followers_str
             })
             
@@ -197,23 +210,19 @@ def update_csv_in_s3(new_df):
     s3 = boto3.client('s3')
     
     try:
-        # 1. Intentar leer el CSV existente
         print(f"Buscando archivo histórico: {CSV_FILENAME}")
         obj = s3.get_object(Bucket=S3_BUCKET, Key=f"output/{CSV_FILENAME}")
         existing_df = pd.read_csv(obj['Body'])
-        print(f"Archivo encontrado con {len(existing_df)} registros.")
         
-        # 2. Concatenar
         combined_df = pd.concat([existing_df, new_df], ignore_index=True)
         
     except s3.exceptions.NoSuchKey:
-        print("Archivo no existe. Creando uno nuevo.")
+        print("Creando archivo nuevo.")
         combined_df = new_df
     except Exception as e:
-        print(f"Error leyendo S3 (posiblemente corrupto, creando nuevo): {e}")
+        print(f"Error leyendo S3 (creando nuevo): {e}")
         combined_df = new_df
 
-    # 3. Guardar de vuelta en S3
     csv_buffer = StringIO()
     combined_df.to_csv(csv_buffer, index=False)
     
@@ -222,7 +231,7 @@ def update_csv_in_s3(new_df):
         Key=f"output/{CSV_FILENAME}",
         Body=csv_buffer.getvalue()
     )
-    print(f"CSV actualizado guardado. Total filas: {len(combined_df)}")
+    print(f"CSV actualizado. Total filas: {len(combined_df)}")
 
 def handler(event, context):
     print("--- INICIO ---")
@@ -233,10 +242,7 @@ def handler(event, context):
         if correlations:
             update_neptune(correlations)
             
-            # Obtener analíticas avanzadas desde el Grafo
             leaders_df = get_leaders_analytics()
-            
-            # Guardar en el CSV acumulativo
             update_csv_in_s3(leaders_df)
     
     print("--- FIN ---")
