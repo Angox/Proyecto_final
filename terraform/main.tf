@@ -115,15 +115,20 @@ resource "aws_neptune_cluster" "default" {
   vpc_security_group_ids              = [aws_security_group.neptune_sg.id]
   skip_final_snapshot                 = true
   apply_immediately                   = true
-  # Usamos serverless o instancia pequeña para ahorrar
-  instance_class                      = "db.t3.medium" 
+  
+  # --- CORRECCIÓN: ---
+  # HE BORRADO LA LÍNEA: instance_class = "db.t3.medium" DE AQUÍ.
+  # El cluster no lleva tamaño, las instancias sí.
 }
 
 resource "aws_neptune_cluster_instance" "example" {
   count              = 1
   cluster_identifier = aws_neptune_cluster.default.id
   engine             = "neptune"
-  instance_class     = "db.t3.medium"
+  
+  # Aquí es donde debe estar:
+  instance_class     = "db.t3.medium" 
+  
   apply_immediately  = true
 }
 
