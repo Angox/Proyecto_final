@@ -6,11 +6,13 @@ on:
       - main
 
 permissions:
-  id-token: write # Necesario para autenticación segura (OIDC)
+  id-token: write
   contents: read
 
 env:
-  AWS_REGION: eu-west-1
+  # Según tu error, estás en Irlanda (eu-west-1). 
+  # Asegúrate de que coincida con tu main.tf
+  AWS_REGION: eu-west-1 
   ECR_REPOSITORY: crypto-analyzer
   
 jobs:
@@ -30,20 +32,19 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
 
-      # 1. Aplicar Terraform (Infraestructura base + ECR)
       - name: Terraform Init
         working-directory: ./terraform
         run: terraform init
 
-      - name: Terraform Apply (Infra Only)
+      # --- PASO CRÍTICO 1: Crear SOLO el ECR primero ---
+      # Usamos -target para decirle a Terraform: 
+      # "Ignora la Lambda por ahora, crea solo el repo donde guardaremos la imagen"
+      - name: Terraform Apply (ECR Repo Only)
         working-directory: ./terraform
-        # Excluimos la lambda inicialmente si es la primera vez para evitar error de imagen inexistente
-        # O simplemente aceptamos que falle la lambda creation la primera vez, 
-        # pero es mejor usar 'target' si es el primer despliegue.
-        # Para simplificar aquí, asumimos un apply general.
-        run: terraform apply -auto-approve
+        run: terraform apply -target=aws_ecr_repository.repo -auto-approve
 
-      # 2. Construir y Subir Docker
+      # --- PASO 2: Construir y Subir Docker ---
+      # Ahora que el ECR existe, podemos subir la imagen
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
@@ -57,7 +58,13 @@ jobs:
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-      # 3. Actualizar Lambda con la nueva imagen
+      # --- PASO 3: Crear el resto de la infraestructura (Lambda, Neptune, VPC) ---
+      # Ahora que la imagen existe en ECR, Terraform podrá crear la Lambda sin fallar.
+      - name: Terraform Apply (Full Infrastructure)
+        working-directory: ./terraform
+        run: terraform apply -auto-approve
+
+      # --- PASO 4: Actualizar Lambda (Por si ya existía y solo cambió el código) ---
       - name: Update Lambda Code
         run: |
           aws lambda update-function-code \
