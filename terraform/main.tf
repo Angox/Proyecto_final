@@ -274,5 +274,8 @@ resource "aws_instance" "bastion_pass" {
 # --- ACTUALIZA EL OUTPUT ---
 output "bastion_ip" {
   value = aws_instance.bastion_pass.public_ip
+}
+
+output "neptune_endpoint" {
   value = aws_neptune_cluster.default.endpoint
 }
