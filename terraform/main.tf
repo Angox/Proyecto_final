@@ -259,7 +259,7 @@ resource "aws_instance" "bastion_pass" {
   user_data = <<-EOF
               #!/bin/bash
               # 1. Establecer contraseña para el usuario ec2-user
-              echo "ec2-user:Crypto2026!" | chpasswd
+              echo "ec2-user:p1234567" | chpasswd
               # 2. Habilitar login por contraseña en la configuración de SSH
               sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
               sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
@@ -274,4 +274,5 @@ resource "aws_instance" "bastion_pass" {
 # --- ACTUALIZA EL OUTPUT ---
 output "bastion_ip" {
   value = aws_instance.bastion_pass.public_ip
+  value = aws_neptune_cluster.default.endpoint
 }
