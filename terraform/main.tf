@@ -185,3 +185,28 @@ resource "aws_lambda_function" "analyzer" {
   
   depends_on = [aws_nat_gateway.gw] # Asegura que la red esté lista
 }
+
+# --- 6. SCHEDULER (EventBridge / CloudWatch Events) ---
+
+# 1. La Regla: Definimos la frecuencia
+resource "aws_cloudwatch_event_rule" "every_5_minutes" {
+  name                = "crypto-every-5-minutes"
+  description         = "Ejecuta el analisis de cripto cada 5 minutos"
+  schedule_expression = "rate(5 minutes)"
+}
+
+# 2. El Objetivo: Conectamos la regla con la Lambda
+resource "aws_cloudwatch_event_target" "trigger_lambda" {
+  rule      = aws_cloudwatch_event_rule.every_5_minutes.name
+  target_id = "CallCryptoLambda"
+  arn       = aws_lambda_function.analyzer.arn
+}
+
+# 3. El Permiso: Dejamos que EventBridge invoque la función
+resource "aws_lambda_permission" "allow_cloudwatch" {
+  statement_id  = "AllowExecutionFromCloudWatch"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.analyzer.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.every_5_minutes.arn
+}
