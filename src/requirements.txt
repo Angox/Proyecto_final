@@ -1,0 +1,6 @@
+pandas
+numpy
+ccxt
+gremlinpython
+boto3
+nest_asyncio
