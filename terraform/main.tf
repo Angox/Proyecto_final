@@ -210,3 +210,59 @@ resource "aws_lambda_permission" "allow_cloudwatch" {
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.every_5_minutes.arn
 }
+
+
+# --- 7. ACCESO VISUALIZACIÓN (Bastion Host) ---
+
+# Seguridad para el Bastion (Permitir SSH desde tu casa)
+resource "aws_security_group" "bastion_sg" {
+  name        = "bastion-sg"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # En prod, pon tu IP de casa aquí
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Permitir que el Bastion hable con Neptune
+resource "aws_security_group_rule" "neptune_allow_bastion" {
+  type                     = "ingress"
+  from_port                = 8182
+  to_port                  = 8182
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.neptune_sg.id
+  source_security_group_id = aws_security_group.bastion_sg.id
+}
+
+# La Instancia EC2
+resource "aws_instance" "bastion" {
+  ami           = "ami-0694d931cee176e7d" # Amazon Linux 2023 (eu-west-1)
+  instance_type = "t2.micro"              # Capa gratuita
+  subnet_id     = aws_subnet.public.id
+  
+  # IMPORTANTE: El nombre de la llave que creaste en el paso 1
+  key_name      = "crypto-key" 
+
+  vpc_security_group_ids = [aws_security_group.bastion_sg.id]
+  associate_public_ip_address = true
+
+  tags = { Name = "Crypto-Bastion" }
+}
+
+# Output para saber la IP rápido
+output "bastion_ip" {
+  value = aws_instance.bastion.public_ip
+}
+output "neptune_endpoint" {
+  value = aws_neptune_cluster.default.endpoint
+}
