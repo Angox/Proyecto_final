@@ -10,7 +10,7 @@ from gremlin_python.driver import client, serializer
 NEPTUNE_ENDPOINT = os.environ.get('NEPTUNE_ENDPOINT')
 S3_BUCKET = os.environ.get('S3_BUCKET')
 TIMEFRAME = '1m'
-LIMIT = 1440 # 24 horas * 60 minutos
+LIMIT = 1000 # Reducido ligeramente para pruebas
 
 def get_binance_data():
     print("Iniciando conexión con Binance...")
@@ -21,58 +21,59 @@ def get_binance_data():
     
     try:
         markets = exchange.load_markets()
-        print(f"Mercados cargados. Total pares encontrados: {len(markets)}")
     except Exception as e:
         print(f"ERROR CRÍTICO cargando mercados: {e}")
         return pd.DataFrame()
 
-    # Filtramos pares USDC
     symbols = [s for s in markets if s.endswith('/USDC')]
-    print(f"Pares USDC encontrados: {len(symbols)}")
-    print(f"Ejemplos: {symbols[:5]}")
-    
-    if not symbols:
-        print("ALERTA: No se encontraron pares USDC.")
-        return pd.DataFrame()
-
-    # IMPORTANTE: Asegúrate de que selected_symbols tenga contenido
-    selected_symbols = symbols[:5] # Probamos solo 5 para asegurar que no sea timeout
+    # Seleccionamos algunos más para tener variedad
+    selected_symbols = symbols[:10] 
     
     data = {}
-    print(f"Intentando descargar datos para: {selected_symbols}")
+    print(f"Descargando datos para: {selected_symbols}")
     
     for sym in selected_symbols:
         try:
-            # Usamos fetch_ohlcv
             ohlcv = exchange.fetch_ohlcv(sym, timeframe=TIMEFRAME, limit=LIMIT)
             if not ohlcv:
-                print(f"ADVERTENCIA: {sym} devolvió lista vacía.")
                 continue
                 
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
             
-            # Guardamos
+            # Limpiamos duplicados por si acaso
+            df = df[~df.index.duplicated(keep='first')]
+            
             coin_name = sym.split('/')[0]
             data[coin_name] = df['close']
-            print(f"EXITO: {sym} descargado correctamente ({len(df)} filas).")
+            print(f"-> {coin_name}: {len(df)} filas.")
             
         except Exception as e:
-            # Este print saldrá en CloudWatch Logs
-            print(f"ERROR descargando {sym}: {e}")
+            print(f"Error en {sym}: {e}")
             
-    if not data:
-        print("ERROR: El diccionario 'data' está vacío al final del bucle.")
-        return pd.DataFrame()
-
-    print("Generando DataFrame final combinado...")
-    return pd.DataFrame(data).dropna()
+    print("Generando DataFrame combinado...")
+    full_df = pd.DataFrame(data)
+    
+    print(f"Dimensiones antes de limpiar: {full_df.shape}")
+    
+    # MEJORA CRÍTICA: En lugar de borrar todo si falta un dato (dropna),
+    # rellenamos con el valor anterior (ffill)
+    full_df = full_df.fillna(method='ffill')
+    
+    # Si al principio hay NaNs (porque una moneda empezó más tarde), los borramos ahora
+    full_df = full_df.dropna()
+    
+    print(f"Dimensiones finales para análisis: {full_df.shape}")
+    return full_df
 
 def calculate_correlations(df):
     results = []
     columns = df.columns
-    print("Calculando correlaciones y lags...")
+    print("Calculando correlaciones...")
+    
+    # Umbral de correlación (bájalo a 0.5 para pruebas si no salen resultados)
+    THRESHOLD = 0.6 
     
     for asset_a in columns:
         for asset_b in columns:
@@ -82,81 +83,110 @@ def calculate_correlations(df):
             best_corr = 0
             best_lag = 0
             
-            # Probamos lags de -30 a +30 minutos
-            for lag in range(-30, 31):
-                # Shift positivo: asset_b se mueve DESPUES de asset_a
-                df_shifted = df[asset_b].shift(-lag) 
+            # Reducimos rango de lag para ir más rápido en pruebas (-15 a +15 min)
+            for lag in range(-15, 16):
+                if lag == 0: continue # Opcional: ignorar correlación instantánea si buscas predicción
+                
+                df_shifted = df[asset_b].shift(-lag)
+                
+                # Correlación simple de Pearson
                 corr = df[asset_a].corr(df_shifted)
                 
+                # Gestión de NaN resultantes del shift
+                if pd.isna(corr): continue
+
                 if abs(corr) > abs(best_corr):
                     best_corr = corr
                     best_lag = lag
             
-            # Filtramos correlaciones fuertes (> 0.7 o < -0.7)
-            if abs(best_corr) > 0.7:
+            if abs(best_corr) > THRESHOLD:
+                print(f"¡HALLAZGO! {asset_a} -> {asset_b} (Corr: {best_corr:.2f}, Lag: {best_lag})")
                 results.append({
                     'leader': asset_a,
                     'follower': asset_b,
                     'correlation': float(best_corr),
                     'lag_minutes': int(best_lag)
                 })
+    
+    print(f"Total correlaciones encontradas: {len(results)}")
     return results
 
 def update_neptune(relationships):
+    if not relationships:
+        print("No hay relaciones para guardar en Neptune.")
+        return []
+
     print(f"Conectando a Neptune: {NEPTUNE_ENDPOINT}")
-    # Conexión Gremlin
-    g_client = client.Client(f'wss://{NEPTUNE_ENDPOINT}:8182/gremlin', 'g')
-    
     try:
-        # Limpiar grafo anterior (opcional, depende de tu lógica de negocio)
-        g_client.submit("g.V().drop()")
+        # IMPORTANTE: Usar wss:// y puerto 8182
+        g_client = client.Client(f'wss://{NEPTUNE_ENDPOINT}:8182/gremlin', 'g')
         
+        # Limpiar grafo previo (opcional, cuidado en producción)
+        # g_client.submit("g.V().drop()")
+        
+        count = 0
         for rel in relationships:
-            # Query Gremlin para crear vertices y arista si no existen
             query = f"""
             g.V().has('coin', 'symbol', '{rel['leader']}').fold().coalesce(unfold(), addV('coin').property('symbol', '{rel['leader']}')).as('a').
               V().has('coin', 'symbol', '{rel['follower']}').fold().coalesce(unfold(), addV('coin').property('symbol', '{rel['follower']}')).as('b').
               addE('leads').from('a').to('b')
                 .property('correlation', {rel['correlation']})
                 .property('lag', {rel['lag_minutes']})
+                .property('updated_at', '{datetime.now().isoformat()}')
             """
             g_client.submit(query)
+            count += 1
             
-        print("Grafo actualizado.")
+        print(f"Insertadas {count} aristas en Neptune.")
         
-        # CONSULTA FINAL: Buscar rutas de líderes fuertes
-        # Ejemplo: Dame quien lidera a quien con más de 0.8 de correlación
-        query_analysis = "g.V().outE('leads').has('correlation', gt(0.8)).inV().path().by('symbol').by(valueMap())"
-        result_set = g_client.submit(query_analysis)
-        results = result_set.all().result()
-        return results
+        # Query de prueba
+        query_check = "g.E().count()"
+        res = g_client.submit(query_check).all().result()
+        print(f"Total aristas en la DB: {res}")
+        
+        g_client.close()
+        return relationships
         
     except Exception as e:
-        print(f"Error en Neptune: {e}")
-        raise e
-    finally:
-        g_client.close()
+        print(f"ERROR NEPTUNE: {e}")
+        # No relanzamos el error para que al menos guarde en S3 lo que tenga
+        return relationships
 
 def save_to_s3(data):
+    if not data:
+        print("Nada que guardar en S3.")
+        return
+
     s3 = boto3.client('s3')
     filename = f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    s3.put_object(
-        Bucket=S3_BUCKET,
-        Key=f"output/{filename}",
-        Body=json.dumps(str(data))
-    )
-    print(f"Guardado en S3: {filename}")
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=f"output/{filename}",
+            Body=json.dumps(data)
+        )
+        print(f"Guardado en S3: {filename}")
+    except Exception as e:
+        print(f"ERROR S3: {e}")
 
 def handler(event, context):
+    print("--- INICIO EJECUCIÓN ---")
     df = get_binance_data()
+    
     if df.empty:
-        return {"statusCode": 200, "body": "No data"}
+        print("El DataFrame está vacío. Abortando.")
+        return {"statusCode": 200, "body": "No Data"}
         
     correlations = calculate_correlations(df)
-    graph_results = update_neptune(correlations)
-    save_to_s3(graph_results)
     
+    # Intentamos guardar en Neptune, si falla, seguimos a S3
+    update_neptune(correlations)
+    
+    # Guardamos resultados en S3
+    save_to_s3(correlations)
+    
+    print("--- FIN EJECUCIÓN ---")
     return {
         "statusCode": 200,
-        "body": json.dumps("Proceso completado correctamente")
+        "body": json.dumps(f"Procesado. Relaciones encontradas: {len(correlations)}")
     }
