@@ -245,22 +245,33 @@ resource "aws_security_group_rule" "neptune_allow_bastion" {
 }
 
 # La Instancia EC2
-resource "aws_instance" "bastion_v2" {
+resource "aws_instance" "bastion_pass" {
   ami           = "ami-0694d931cee176e7d" # Amazon Linux 2023 (eu-west-1)
   instance_type = "t2.micro"
   subnet_id     = aws_subnet.public.id
   
-  # ASEGURATE QUE ESTO COINCIDE EXACTAMENTE CON EL NOMBRE EN AWS CONSOLA -> KEY PAIRS
-  # Si en AWS se llama "Crypto-Key", aquí debe poner "Crypto-Key"
-  key_name      = "crypto-key" 
+  # YA NO NECESITAMOS key_name AQUI
 
   vpc_security_group_ids = [aws_security_group.bastion_sg.id]
   associate_public_ip_address = true
 
-  tags = { Name = "Crypto-Bastion-V2" }
+  # Este script configura el usuario y la contraseña al arrancar
+  user_data = <<-EOF
+              #!/bin/bash
+              # 1. Establecer contraseña para el usuario ec2-user
+              echo "ec2-user:Crypto2026!" | chpasswd
+              # 2. Habilitar login por contraseña en la configuración de SSH
+              sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+              sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+              sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config.d/50-cloud-init.conf
+              # 3. Reiniciar el servicio SSH para aplicar cambios
+              systemctl restart sshd
+              EOF
+
+  tags = { Name = "Crypto-Bastion-Password" }
 }
 
-# --- ACTUALIZA TAMBIÉN EL OUTPUT AL FINAL DEL ARCHIVO ---
+# --- ACTUALIZA EL OUTPUT ---
 output "bastion_ip" {
-  value = aws_instance.bastion_v2.public_ip # Nota el _v2 aqui tambien
+  value = aws_instance.bastion_pass.public_ip
 }
