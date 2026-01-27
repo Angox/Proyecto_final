@@ -13,27 +13,60 @@ TIMEFRAME = '1m'
 LIMIT = 1440 # 24 horas * 60 minutos
 
 def get_binance_data():
-    exchange = ccxt.binance()
-    markets = exchange.load_markets()
+    print("Iniciando conexión con Binance...")
+    exchange = ccxt.binance({
+        'timeout': 30000, 
+        'enableRateLimit': True
+    })
+    
+    try:
+        markets = exchange.load_markets()
+        print(f"Mercados cargados. Total pares encontrados: {len(markets)}")
+    except Exception as e:
+        print(f"ERROR CRÍTICO cargando mercados: {e}")
+        return pd.DataFrame()
+
     # Filtramos pares USDC
     symbols = [s for s in markets if s.endswith('/USDC')]
+    print(f"Pares USDC encontrados: {len(symbols)}")
+    print(f"Ejemplos: {symbols[:5]}")
     
-    # Para producción, limita esto a top 10-20 monedas para evitar timeout en Lambda
-    # o aumenta la memoria del Lambda al máximo.
-    selected_symbols = symbols[:10] 
+    if not symbols:
+        print("ALERTA: No se encontraron pares USDC.")
+        return pd.DataFrame()
+
+    # IMPORTANTE: Asegúrate de que selected_symbols tenga contenido
+    selected_symbols = symbols[:5] # Probamos solo 5 para asegurar que no sea timeout
     
     data = {}
-    print("Descargando datos de Binance...")
+    print(f"Intentando descargar datos para: {selected_symbols}")
+    
     for sym in selected_symbols:
         try:
+            # Usamos fetch_ohlcv
             ohlcv = exchange.fetch_ohlcv(sym, timeframe=TIMEFRAME, limit=LIMIT)
+            if not ohlcv:
+                print(f"ADVERTENCIA: {sym} devolvió lista vacía.")
+                continue
+                
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
-            data[sym.split('/')[0]] = df['close'] # Guardamos solo el precio de cierre y el nombre de la moneda (BTC, ETH)
-        except Exception as e:
-            print(f"Error descargando {sym}: {e}")
             
+            # Guardamos
+            coin_name = sym.split('/')[0]
+            data[coin_name] = df['close']
+            print(f"EXITO: {sym} descargado correctamente ({len(df)} filas).")
+            
+        except Exception as e:
+            # Este print saldrá en CloudWatch Logs
+            print(f"ERROR descargando {sym}: {e}")
+            
+    if not data:
+        print("ERROR: El diccionario 'data' está vacío al final del bucle.")
+        return pd.DataFrame()
+
+    print("Generando DataFrame final combinado...")
     return pd.DataFrame(data).dropna()
 
 def calculate_correlations(df):
