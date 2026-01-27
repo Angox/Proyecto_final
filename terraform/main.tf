@@ -245,31 +245,34 @@ resource "aws_security_group_rule" "neptune_allow_bastion" {
 }
 
 # La Instancia EC2
-resource "aws_instance" "bastion_pass" {
+resource "aws_instance" "bastion_final" {
   ami           = "ami-0694d931cee176e7d" # Amazon Linux 2023 (eu-west-1)
   instance_type = "t2.micro"
   subnet_id     = aws_subnet.public.id
   
-  # YA NO NECESITAMOS key_name AQUI
+  # Sin key_name, todo por contraseña
 
   vpc_security_group_ids = [aws_security_group.bastion_sg.id]
   associate_public_ip_address = true
 
-  # Este script configura el usuario y la contraseña al arrancar
+  # Este script asegura que NADA bloquee la contraseña
   user_data = <<-EOF
               #!/bin/bash
-              # 1. Establecer contraseña para el usuario ec2-user
-              echo "ec2-user:p1234567" | chpasswd
-              # 2. Habilitar login por contraseña en la configuración de SSH
-              sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-              sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-              sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config.d/50-cloud-init.conf
-              # 3. Reiniciar el servicio SSH para aplicar cambios
+              # 1. Establecer la contraseña del usuario (usuario: ec2-user)
+              echo "ec2-user:Crypto2026!" | chpasswd
+              
+              # 2. Crear un archivo de configuración prioritario que fuerce la aceptación
+              # El numero 99 asegura que se carga el último y manda sobre los demás
+              echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/99-force-login.conf
+              echo "KbdInteractiveAuthentication yes" >> /etc/ssh/sshd_config.d/99-force-login.conf
+              
+              # 3. Reiniciar el servicio SSH
               systemctl restart sshd
               EOF
 
-  tags = { Name = "Crypto-Bastion-Password" }
+  tags = { Name = "Crypto-Bastion-Final" }
 }
+
 
 # --- ACTUALIZA EL OUTPUT ---
 output "bastion_ip" {
