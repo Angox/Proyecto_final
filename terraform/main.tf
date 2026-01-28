@@ -244,3 +244,66 @@ resource "aws_security_group_rule" "neptune_allow_bastion" {
   source_security_group_id = aws_security_group.bastion_sg.id
 }
 
+
+# --- 8. NOTEBOOK PARA VISUALIZACIÓN (SageMaker) ---
+
+# 1. Seguridad: Permitir que el Notebook hable con Neptune
+resource "aws_security_group" "notebook_sg" {
+  name        = "crypto-notebook-sg"
+  vpc_id      = aws_vpc.main.id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"] # Para descargar librerías de internet (vía NAT)
+  }
+}
+
+# Regla: Dejar entrar al Notebook en Neptune
+resource "aws_security_group_rule" "neptune_allow_notebook" {
+  type                     = "ingress"
+  from_port                = 8182
+  to_port                  = 8182
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.neptune_sg.id
+  source_security_group_id = aws_security_group.notebook_sg.id
+}
+
+# 2. Permisos IAM: El Notebook necesita permisos básicos
+resource "aws_iam_role" "notebook_role" {
+  name = "crypto_notebook_role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = { Service = "sagemaker.amazonaws.com" }
+    }]
+  })
+}
+
+# Adjuntamos política full access (para desarrollo es ok)
+resource "aws_iam_role_policy_attachment" "notebook_sagemaker_full" {
+  role       = aws_iam_role.notebook_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
+}
+
+# 3. La Instancia del Notebook
+resource "aws_sagemaker_notebook_instance" "neptune_notebook" {
+  name                    = "crypto-graph-visualizer"
+  role_arn                = aws_iam_role.notebook_role.arn
+  instance_type           = "ml.t3.medium" # Capa económica
+  
+  # CRÍTICO: Ponerlo en la misma subred que la Lambda (Privada con NAT)
+  subnet_id               = aws_subnet.private_a.id
+  security_groups         = [aws_security_group.notebook_sg.id]
+  
+  # Acceso a internet a través del NAT Gateway (necesario para pip install)
+  direct_internet_access  = "Disabled" 
+}
+
+# Output para ir directo a la consola
+output "notebook_url" {
+  value = "https://${var.region}.console.aws.amazon.com/sagemaker/home?region=${var.region}#/notebook-instances/crypto-graph-visualizer"
+}
