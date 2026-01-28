@@ -1,6 +1,7 @@
 import os
 import boto3
 import pandas as pd
+import numpy as np
 from io import StringIO
 from datetime import datetime
 
@@ -8,7 +9,6 @@ from datetime import datetime
 SIGNALS_BUCKET = os.environ.get('SIGNALS_BUCKET')
 INPUT_BUCKET = os.environ.get('INPUT_BUCKET')
 CSV_OUTPUT_NAME = "trading_signals.csv"
-# Ubicación por defecto del archivo de entrada (por si fallan los eventos)
 DEFAULT_INPUT_KEY = "output/market_leaders_history.csv"
 
 s3 = boto3.client('s3')
@@ -17,6 +17,7 @@ def get_latest_data(bucket, key):
     print(f"--- Leyendo archivo: s3://{bucket}/{key} ---")
     try:
         response = s3.get_object(Bucket=bucket, Key=key)
+        # Pandas inferirá las nuevas columnas automáticamente
         return pd.read_csv(response['Body'])
     except Exception as e:
         print(f"Error leyendo S3: {e}")
@@ -24,95 +25,119 @@ def get_latest_data(bucket, key):
 
 def detect_strategies(row):
     """
-    Analiza una fila de datos y devuelve una lista de señales detectadas.
-    VERSIÓN PERMISIVA: Umbrales reducidos para garantizar señales.
+    Analiza una fila y genera señales usando DATOS AVANZADOS (Volumen, Volatilidad, Calidad).
     """
     signals = []
     
+    # Datos Básicos
     leader = row['leader']
     corr = row['avg_correlation']
     lag = row['avg_lag_minutes']
     followers_count = row['follower_count']
-    followers_str = row['followers_list']
     timestamp = row['timestamp']
+    
+    # --- NUEVOS DATOS (Con manejo de errores por si hay filas viejas) ---
+    # Usamos .get() o verificamos si la columna existe en la row
+    quality = row['leader_quality'] if 'leader_quality' in row else 'WEAK'
+    volatility = float(row['volatility_score']) if 'volatility_score' in row and not pd.isna(row['volatility_score']) else 0.0
+    volume_mom = float(row['volume_momentum']) if 'volume_momentum' in row and not pd.isna(row['volume_momentum']) else 1.0
+    influence = int(row['influence_score']) if 'influence_score' in row and not pd.isna(row['influence_score']) else followers_count
 
-    # --- ESTRATEGIA 1: LEADER MOMENTUM (Scalping Rápido) ---
-    if lag > 0.2 and corr > 0.70:
-        strength = 'HIGH' if corr > 0.85 else 'MEDIUM'
+    # ---------------------------------------------------------
+    # ESTRATEGIA 1: ALPHA PREDATOR (NUEVA - MÁXIMA CALIDAD)
+    # ---------------------------------------------------------
+    # Un líder 'ALPHA' (independiente) que se mueve con VOLUMEN (>1.1x promedio).
+    # Esta es la señal más fiable del sistema.
+    if quality == 'ALPHA' and volume_mom > 1.1:
+        signals.append({
+            'strategy': 'ALPHA_PREDATOR',
+            'signal_strength': 'CRITICAL', # Máxima prioridad
+            'description': f"ALPHA Leader {leader} moving with Volume ({volume_mom}x). Pure trend origin.",
+            'action_asset': leader,
+            'trade_asset': 'FOLLOWERS_AGGRESSIVE',
+            'condition': 'Immediate Entry'
+        })
+
+    # ---------------------------------------------------------
+    # ESTRATEGIA 2: VOLATILITY BREAKOUT (NUEVA)
+    # ---------------------------------------------------------
+    # El líder tiene alta volatilidad (>0.4%) y arrastra a otros.
+    # Indica que el movimiento es explosivo, no ruido lateral.
+    if volatility > 0.4 and lag > 0.1 and corr > 0.6:
+        signals.append({
+            'strategy': 'VOL_BREAKOUT',
+            'signal_strength': 'HIGH',
+            'description': f"{leader} High Volatility ({volatility:.2f}%) breakout detected.",
+            'action_asset': leader,
+            'trade_asset': 'FOLLOWERS',
+            'condition': 'Breakout Catch'
+        })
+
+    # ---------------------------------------------------------
+    # ESTRATEGIA 3: LEADER MOMENTUM (CLÁSICA - Permisiva)
+    # ---------------------------------------------------------
+    # Mantenemos umbrales bajos para asegurar flujo de datos
+    if lag > 0.15 and corr > 0.55:
         signals.append({
             'strategy': 'LEADER_MOMENTUM',
-            'signal_strength': strength,
-            'description': f"Leader {leader} moves {lag}m ahead (Corr: {corr:.2f}). Scalp followers.",
+            'signal_strength': 'MEDIUM',
+            'description': f"Standard lead: {leader} is {lag}m ahead.",
             'action_asset': leader,
             'trade_asset': 'FOLLOWERS', 
-            'condition': 'Quick Scalp / Breakout'
+            'condition': 'Standard Scalp'
         })
 
-    # --- ESTRATEGIA 2: LAG CATCH-UP (Reversión / Lentos) ---
-    if lag < -1.5 and corr > 0.65:
+    # ---------------------------------------------------------
+    # ESTRATEGIA 4: VOLUME DIVERGENCE (NUEVA)
+    # ---------------------------------------------------------
+    # El líder tiene mucho volumen pero el precio apenas se mueve (lag bajo)
+    # Esto suele anticipar un movimiento explosivo inminente.
+    if volume_mom > 2.0 and abs(lag) < 0.5:
+        signals.append({
+            'strategy': 'VOLUME_LOADING',
+            'signal_strength': 'HIGH',
+            'description': f"Huge Volume ({volume_mom}x) on {leader} without huge lag yet. Loading phase.",
+            'action_asset': leader,
+            'trade_asset': leader, # Operar el líder directamente
+            'condition': 'Anticipate Breakout'
+        })
+
+    # ---------------------------------------------------------
+    # ESTRATEGIA 5: LAG CATCH-UP (Recuperación)
+    # ---------------------------------------------------------
+    if lag < -1.0 and corr > 0.60:
         signals.append({
             'strategy': 'LAG_CATCHUP',
-            'signal_strength': 'HIGH',
-            'description': f"{leader} is lagging {abs(lag)}m behind group. Expect catch-up move.",
+            'signal_strength': 'MEDIUM',
+            'description': f"{leader} lagging behind group.",
             'action_asset': 'FOLLOWERS', 
             'trade_asset': leader, 
-            'condition': 'Entry on Lag'
+            'condition': 'Reversion'
         })
 
-    # --- ESTRATEGIA 3: INVERSE HEDGE (Correlación Negativa) ---
-    if "(-" in followers_str:
-        pairs = followers_str.split(';')
-        for p in pairs:
-            try:
-                clean_p = p.strip()
-                if '(' not in clean_p: continue
-                symbol = clean_p.split('(')[0]
-                val_str = clean_p.split('(')[1].replace(')', '')
-                val = float(val_str)
-                
-                if val < -0.60:
-                    signals.append({
-                        'strategy': 'INVERSE_PAIR',
-                        'signal_strength': 'MEDIUM',
-                        'description': f"{leader} vs {symbol} inverse correlation ({val}). Hedge opportunity.",
-                        'action_asset': leader,
-                        'trade_asset': symbol,
-                        'condition': 'Trade Opposite'
-                    })
-            except:
-                continue
-
-    # --- ESTRATEGIA 4: CLUSTER BREAKOUT ---
-    if followers_count >= 10 and corr > 0.90:
+    # ---------------------------------------------------------
+    # ESTRATEGIA 6: INSTANT SYNC (Arbitraje)
+    # ---------------------------------------------------------
+    if abs(lag) < 0.08 and corr > 0.92:
         signals.append({
-            'strategy': 'CLUSTER_BREAKOUT',
-            'signal_strength': 'CRITICAL',
-            'description': f"{leader} is part of a massive sync cluster ({followers_count} assets).",
+            'strategy': 'INSTANT_SYNC',
+            'signal_strength': 'HFT',
+            'description': f"Perfect sync {leader}. Arbitrage/Bot lock.",
             'action_asset': leader,
-            'trade_asset': 'ANY_IN_CLUSTER',
-            'condition': 'Cluster Move'
-        })
-        
-    # --- ESTRATEGIA 5: MARKET DRIVER ---
-    elif followers_count >= 5 and corr > 0.70:
-        signals.append({
-            'strategy': 'MARKET_DRIVER',
-            'signal_strength': 'HIGH',
-            'description': f"{leader} driving market sentiment ({followers_count} pairs).",
-            'action_asset': leader,
-            'trade_asset': 'MARKET_ETFs',
-            'condition': 'Trend Confirmation'
+            'trade_asset': 'FOLLOWERS',
+            'condition': 'HFT Execution'
         })
 
-    # Formatear salida
+    # Formatear salida común
     final_output = []
     for s in signals:
         s.update({
             'generated_at': datetime.now().isoformat(),
             'data_timestamp': timestamp,
             'leader_symbol': leader,
-            'avg_lag': lag,
-            'avg_corr': corr
+            'leader_quality': quality,    # Dato útil en el output
+            'volatility': volatility,     # Dato útil en el output
+            'volume_ratio': volume_mom    # Dato útil en el output
         })
         final_output.append(s)
         
@@ -122,7 +147,11 @@ def process_signals(df):
     if df.empty: return pd.DataFrame()
     
     # Tomamos solo el último snapshot de tiempo disponible
+    # (Aseguramos que ordenamos por timestamp por si acaso viene desordenado)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.sort_values('timestamp')
     last_timestamp = df['timestamp'].iloc[-1]
+    
     current_market_state = df[df['timestamp'] == last_timestamp]
     
     all_signals = []
@@ -143,6 +172,11 @@ def update_signals_csv(new_signals_df):
         obj = s3.get_object(Bucket=SIGNALS_BUCKET, Key=CSV_OUTPUT_NAME)
         existing_df = pd.read_csv(obj['Body'])
         combined_df = pd.concat([existing_df, new_signals_df], ignore_index=True)
+        
+        # Mantenimiento: Limitar tamaño archivo señales
+        if len(combined_df) > 2000:
+             combined_df = combined_df.tail(2000)
+             
     except Exception:
         print("Creando archivo de señales desde cero.")
         combined_df = new_signals_df
@@ -158,48 +192,43 @@ def update_signals_csv(new_signals_df):
     print(f"¡Éxito! {len(new_signals_df)} nuevas señales guardadas.")
 
 def handler(event, context):
-    print("--- INICIANDO ANÁLISIS DE SEÑALES (ROBUST MODE) ---")
+    print("--- INICIANDO ANÁLISIS DE SEÑALES V2 (NEPTUNE ENHANCED) ---")
     
-    # --- SOLUCIÓN AL KEYERROR: Detección inteligente del origen ---
     src_bucket = INPUT_BUCKET
     src_key = DEFAULT_INPUT_KEY
     
+    # Detección Robust de Evento
     try:
-        # Intentamos ver si viene de un evento S3 real
         if 'Records' in event and len(event['Records']) > 0:
             if 's3' in event['Records'][0]:
-                print("Evento S3 detectado.")
                 src_bucket = event['Records'][0]['s3']['bucket']['name']
                 src_key = event['Records'][0]['s3']['object']['key']
-        else:
-            print("⚠️ No es un evento S3. Usando configuración por defecto (Variables de Entorno).")
-    except Exception as e:
-        print(f"Advertencia analizando evento: {e}. Usando defaults.")
-
-    print(f"Procesando Bucket: {src_bucket}, Key: {src_key}")
+    except Exception:
+        pass # Fallback a defaults
 
     try:
-        # 1. Leer datos
         df_history = get_latest_data(src_bucket, src_key)
         
         if df_history.empty:
-            print("El CSV de entrada está vacío o no existe.")
-            return {"statusCode": 404, "body": "Input CSV empty"}
+            print("CSV de entrada vacío.")
+            return {"statusCode": 404, "body": "Empty Input"}
 
-        # 2. Procesar estrategias
         signals_df = process_signals(df_history)
         
-        # 3. Guardar resultados
         if not signals_df.empty:
-            # Imprimir una muestra para los logs de CloudWatch
-            print(f"Muestra de señales:\n{signals_df[['strategy', 'leader_symbol', 'action_asset']].head(3)}")
+            print(f"Señales Generadas: {len(signals_df)}")
+            # Loguear las mejores señales
+            best_signals = signals_df[signals_df['signal_strength'].isin(['CRITICAL', 'HIGH'])]
+            if not best_signals.empty:
+                print("--- TOP SEÑALES ---")
+                print(best_signals[['strategy', 'leader_symbol', 'volume_ratio']].head())
+            
             update_signals_csv(signals_df)
         else:
-            print("Análisis completado: Sin señales nuevas.")
+            print("Sin señales (Mercado tranquilo).")
             
     except Exception as e:
-        print(f"ERROR FATAL EN EJECUCIÓN: {e}")
-        # No lanzamos raise para que el lambda no reintente infinitamente si es un error de lógica
+        print(f"ERROR: {e}")
         return {"statusCode": 500, "body": str(e)}
         
-    return {"statusCode": 200, "body": "Signals Processed Successfully"}
+    return {"statusCode": 200, "body": "Signals Processed"}
