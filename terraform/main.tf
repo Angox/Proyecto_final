@@ -309,15 +309,14 @@ output "notebook_url" {
 }
 
 
-# --- 1. NUEVO BUCKET PARA LAS SEÑALES DE TRADING ---
-resource "aws_s3_bucket" "signals_bucket" {
-  # Nombre único (cambia los números si da error)
-  bucket = "crypto-trading-signals-2026-output" 
-}
-
 # --- NUEVO: BUCKET PARA SEÑALES ---
 resource "aws_s3_bucket" "signals_bucket" {
   bucket_prefix = "crypto-trading-signals-"
+}
+
+# --- NUEVO: LAMBDA DE SEÑALES ---
+resource "aws_lambda_function" "signaler" {
+  # ... resto de la configuración ...
 }
 
 # --- NUEVO: LAMBDA DE SEÑALES ---
