@@ -19,6 +19,7 @@ def get_latest_data(bucket, key):
 def detect_strategies(row):
     """
     Analiza una fila de datos y devuelve una lista de señales detectadas.
+    VERSION PERMISIVA: Umbrales reducidos para captar más movimientos.
     """
     signals = []
     
@@ -29,50 +30,48 @@ def detect_strategies(row):
     followers_str = row['followers_list']
     timestamp = row['timestamp']
 
-    # --- ESTRATEGIA 1: LEADER MOMENTUM (La original) ---
-    # El líder se mueve antes (Lag positivo) y tiene fuerte correlación.
-    # Acción: Observar al líder. Si se mueve fuerte, entrar en los seguidores.
-    if lag > 1.0 and corr > 0.75:
+    # --- ESTRATEGIA 1: LEADER MOMENTUM ---
+    # CAMBIO: Lag > 0.5 (antes 1.0) y Corr > 0.60 (antes 0.75)
+    # Riesgo: Puede dar señales en movimientos pequeños o menos claros.
+    if lag > 0.5 and corr > 0.60:
         signals.append({
             'strategy': 'LEADER_MOMENTUM',
-            'signal_strength': 'HIGH' if corr > 0.85 else 'MEDIUM',
-            'description': f"Leader {leader} moves {lag}m ahead. Watch followers for delayed reaction.",
-            'action_asset': leader, # Mirar este
-            'trade_asset': 'FOLLOWERS', # Operar estos
+            'signal_strength': 'HIGH' if corr > 0.80 else 'MEDIUM',
+            'description': f"Leader {leader} moves {lag}m ahead (Permissive Mode). Watch followers.",
+            'action_asset': leader, 
+            'trade_asset': 'FOLLOWERS', 
             'condition': 'Wait for Leader Breakout'
         })
 
     # --- ESTRATEGIA 2: LAG CATCH-UP (Reversión / Retraso) ---
-    # El "líder" tiene Lag NEGATIVO fuerte. Esto significa que en realidad 
-    # este activo está reaccionando TARDÍAMENTE a los activos en su lista de seguidores.
-    # Acción: Si los "seguidores" (que en realidad van delante) se han movido, operar este activo inmediatamente.
-    if lag < -2.0 and corr > 0.80:
+    # CAMBIO: Lag < -1.0 (antes -2.0) y Corr > 0.70 (antes 0.80)
+    # Riesgo: Entrar en activos que simplemente son lentos, no necesariamente retrasados.
+    if lag < -1.0 and corr > 0.70:
         signals.append({
             'strategy': 'LAG_CATCHUP',
-            'signal_strength': 'HIGH',
-            'description': f"{leader} is lagging {abs(lag)}m behind its pairs. Check if pairs moved recently.",
-            'action_asset': 'FOLLOWERS', # Si estos se movieron...
-            'trade_asset': leader, # ...Operar este (Catch-up)
+            'signal_strength': 'MEDIUM',
+            'description': f"{leader} is lagging {abs(lag)}m behind. Catch-up potential.",
+            'action_asset': 'FOLLOWERS', 
+            'trade_asset': leader, 
             'condition': 'Immediate Entry if Divergence'
         })
 
     # --- ESTRATEGIA 3: INVERSE HEDGE (Correlación Negativa) ---
-    # Buscamos en la lista de seguidores aquellos con correlación negativa (ej: -0.8).
-    # Útil para coberturas (Hedging) o pares de arbitraje.
-    if "(-" in followers_str: # Detección rápida de negativos en el string
-        # Parseamos la lista para encontrar el negativo específico
+    # CAMBIO: Detecta desde -0.50 (antes -0.70)
+    if "(-" in followers_str: 
         pairs = followers_str.split(';')
         for p in pairs:
             try:
-                # Formato esperado: SYMBOL(CORR)
                 clean_p = p.strip()
                 symbol = clean_p.split('(')[0]
-                val = float(clean_p.split('(')[1].replace(')', ''))
+                val_str = clean_p.split('(')[1].replace(')', '')
+                val = float(val_str)
                 
-                if val < -0.70:
+                # Umbral más relajado para correlación inversa
+                if val < -0.50:
                     signals.append({
                         'strategy': 'INVERSE_PAIR',
-                        'signal_strength': 'MEDIUM',
+                        'signal_strength': 'LOW' if val > -0.7 else 'MEDIUM',
                         'description': f"{leader} moves OPPOSITE to {symbol} (Corr: {val}).",
                         'action_asset': leader,
                         'trade_asset': symbol,
@@ -82,13 +81,12 @@ def detect_strategies(row):
                 continue
 
     # --- ESTRATEGIA 4: MARKET DRIVER (Sentimiento General) ---
-    # Un activo con muchísimos seguidores (>5) define la tendencia del mercado.
-    # No es para operar un par específico, sino para definir si somos Bullish o Bearish en general.
-    if followers_count >= 5 and corr > 0.8:
+    # CAMBIO: Solo 3 seguidores requeridos (antes 5) y Corr > 0.70
+    if followers_count >= 3 and corr > 0.70:
         signals.append({
             'strategy': 'MARKET_DRIVER',
-            'signal_strength': 'CRITICAL',
-            'description': f"{leader} is driving the market with {followers_count} correlated assets.",
+            'signal_strength': 'HIGH',
+            'description': f"{leader} is driving a cluster of {followers_count} assets.",
             'action_asset': leader,
             'trade_asset': 'ALL_MARKET',
             'condition': 'Trend Confirmation'
@@ -127,7 +125,6 @@ def update_signals_csv(new_signals_df):
         return
 
     try:
-        # Intentar leer histórico de señales para hacer append
         print(f"Buscando histórico en {SIGNALS_BUCKET}...")
         obj = s3.get_object(Bucket=SIGNALS_BUCKET, Key=CSV_OUTPUT_NAME)
         existing_df = pd.read_csv(obj['Body'])
@@ -136,7 +133,6 @@ def update_signals_csv(new_signals_df):
         print(f"Archivo nuevo o error leyendo: {e}. Creando desde cero.")
         combined_df = new_signals_df
 
-    # Guardar
     csv_buffer = StringIO()
     combined_df.to_csv(csv_buffer, index=False)
     
@@ -148,29 +144,24 @@ def update_signals_csv(new_signals_df):
     print(f"¡Éxito! {len(new_signals_df)} nuevas señales guardadas.")
 
 def handler(event, context):
-    print("--- INICIANDO ANÁLISIS DE SEÑALES AVANZADO ---")
+    print("--- INICIANDO ANÁLISIS DE SEÑALES (MODO PERMISIVO) ---")
     
     try:
-        # Obtener bucket y key del evento S3
         record = event['Records'][0]
         src_bucket = record['s3']['bucket']['name']
         src_key = record['s3']['object']['key']
         
-        # 1. Leer datos crudos
         df_history = get_latest_data(src_bucket, src_key)
-        
-        # 2. Procesar estrategias
         signals_df = process_signals(df_history)
         
-        # 3. Guardar resultados
         if not signals_df.empty:
             print(f"Señales generadas:\n{signals_df[['strategy', 'leader_symbol', 'action_asset']].head()}")
             update_signals_csv(signals_df)
         else:
-            print("Mercado sin anomalías detectables.")
+            print("Mercado sin anomalías detectables (incluso con filtros bajos).")
             
     except Exception as e:
         print(f"ERROR FATAL: {e}")
         raise e
         
-    return {"statusCode": 200, "body": "Advanced Analysis Complete"}
+    return {"statusCode": 200, "body": "Permissive Analysis Complete"}
