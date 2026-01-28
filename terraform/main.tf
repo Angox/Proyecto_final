@@ -305,5 +305,5 @@ resource "aws_sagemaker_notebook_instance" "neptune_notebook" {
 
 # Output para ir directo a la consola
 output "notebook_url" {
-  value = "https://${var.region}.console.aws.amazon.com/sagemaker/home?region=${var.region}#/notebook-instances/crypto-graph-visualizer"
+  value = "https://eu-west-1.console.aws.amazon.com/sagemaker/home?region=eu-west-1#/notebook-instances/crypto-graph-visualizer"
 }
