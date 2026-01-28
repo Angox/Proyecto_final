@@ -14,7 +14,7 @@ def get_latest_data(bucket, key):
     response = s3.get_object(Bucket=bucket, Key=key)
     content = response['Body'].read().decode('utf-8')
     reader = csv.DictReader(io.StringIO(content))
-    
+
     data = list(reader)
     if not data:
         return []
@@ -27,7 +27,7 @@ def get_latest_data(bucket, key):
 def generate_signals(rows):
     """Aplica la lógica de trading"""
     signals = []
-    
+
     for row in rows:
         leader = row['leader']
         followers = int(row['follower_count'])
@@ -43,7 +43,7 @@ def generate_signals(rows):
         if followers >= 4 and corr > 0.80:
             signal_type = "BUY_STRONG"
             reason = f"Market Mover: Arrastra a {followers} monedas con alta confianza."
-        
+
         # Regla 2: Compra Especulativa (Alta correlación en nicho)
         elif followers >= 2 and corr > 0.95:
             signal_type = "BUY_NICHE"
@@ -56,7 +56,7 @@ def generate_signals(rows):
 
         if signal_type != "NEUTRAL":
             signals.append([ts, signal_type, leader, followers, corr, lag, reason])
-            
+
     return signals
 
 def append_to_signals_file(new_signals):
@@ -68,7 +68,7 @@ def append_to_signals_file(new_signals):
     # 1. Intentar descargar el archivo existente
     existing_data = ""
     header = "timestamp,signal,asset,strength,correlation,lag,reason\n"
-    
+
     try:
         resp = s3.get_object(Bucket=OUTPUT_BUCKET, Key=OUTPUT_FILE_KEY)
         existing_data = resp['Body'].read().decode('utf-8')
@@ -81,13 +81,13 @@ def append_to_signals_file(new_signals):
     new_lines = io.StringIO()
     writer = csv.writer(new_lines)
     writer.writerows(new_signals)
-    
+
     # 3. Concatenar y Subir
     final_content = existing_data
     # Asegurar que hay un salto de línea antes de añadir
     if existing_data and not existing_data.endswith('\n'):
         final_content += "\n"
-    
+
     final_content += new_lines.getvalue()
 
     s3.put_object(Bucket=OUTPUT_BUCKET, Key=OUTPUT_FILE_KEY, Body=final_content)
@@ -98,21 +98,21 @@ def handler(event, context):
         # Obtener bucket y archivo que disparó el evento
         source_bucket = event['Records'][0]['s3']['bucket']['name']
         source_key = event['Records'][0]['s3']['object']['key']
-        
+
         print(f"Procesando actualización en: {source_key}")
-        
+
         # 1. Leer datos nuevos
         rows = get_latest_data(source_bucket, source_key)
-        
+
         # 2. Generar Señales
         signals = generate_signals(rows)
-        
+
         # 3. Guardar
         if signals:
             append_to_signals_file(signals)
-        
+
         return {"statusCode": 200, "body": "OK"}
-        
+
     except Exception as e:
         print(f"Error: {e}")
         return {"statusCode": 500, "body": str(e)}
