@@ -309,22 +309,19 @@ output "notebook_url" {
 }
 
 
+# ... (Todo lo anterior déjalo igual: VPC, Neptune, SageMaker, etc.) ...
+
 # --- NUEVO: BUCKET PARA SEÑALES ---
 resource "aws_s3_bucket" "signals_bucket" {
   bucket_prefix = "crypto-trading-signals-"
 }
 
-# --- NUEVO: LAMBDA DE SEÑALES ---
-resource "aws_lambda_function" "signaler" {
-  # ... resto de la configuración ...
-}
-
-# --- NUEVO: LAMBDA DE SEÑALES ---
+# --- NUEVO: LAMBDA DE SEÑALES (SOLO UNA VEZ) ---
 resource "aws_lambda_function" "signaler" {
   function_name = "crypto-signaler"
-  role          = aws_iam_role.lambda_exec.arn # Reusamos el rol por simplicidad (idealmente crear uno nuevo)
+  role          = aws_iam_role.lambda_exec.arn 
   package_type  = "Image"
-  image_uri     = "${aws_ecr_repository.repo.repository_url}:latest" # Misma imagen
+  image_uri     = "${aws_ecr_repository.repo.repository_url}:latest"
   timeout       = 60
   memory_size   = 512
 
@@ -342,7 +339,6 @@ resource "aws_lambda_function" "signaler" {
 }
 
 # --- NUEVO: TRIGGER S3 (Event Notification) ---
-# Esto conecta el Bucket de Datos -> Lambda de Señales
 resource "aws_lambda_permission" "allow_s3" {
   statement_id  = "AllowExecutionFromS3"
   action        = "lambda:InvokeFunction"
@@ -357,8 +353,8 @@ resource "aws_s3_bucket_notification" "bucket_notification" {
   lambda_function {
     lambda_function_arn = aws_lambda_function.signaler.arn
     events              = ["s3:ObjectCreated:*"]
-    filter_prefix       = "output/"                   # Solo si cambia algo en la carpeta output
-    filter_suffix       = "market_leaders_history.csv" # Específicamente este archivo
+    filter_prefix       = "output/"                   
+    filter_suffix       = "market_leaders_history.csv" 
   }
 
   depends_on = [aws_lambda_permission.allow_s3]
