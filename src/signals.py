@@ -8,13 +8,19 @@ from datetime import datetime
 SIGNALS_BUCKET = os.environ.get('SIGNALS_BUCKET')
 INPUT_BUCKET = os.environ.get('INPUT_BUCKET')
 CSV_OUTPUT_NAME = "trading_signals.csv"
+# Ubicación por defecto del archivo de entrada (por si fallan los eventos)
+DEFAULT_INPUT_KEY = "output/market_leaders_history.csv"
 
 s3 = boto3.client('s3')
 
 def get_latest_data(bucket, key):
-    print(f"Leyendo archivo: s3://{bucket}/{key}")
-    response = s3.get_object(Bucket=bucket, Key=key)
-    return pd.read_csv(response['Body'])
+    print(f"--- Leyendo archivo: s3://{bucket}/{key} ---")
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+        return pd.read_csv(response['Body'])
+    except Exception as e:
+        print(f"Error leyendo S3: {e}")
+        return pd.DataFrame()
 
 def detect_strategies(row):
     """
@@ -31,8 +37,6 @@ def detect_strategies(row):
     timestamp = row['timestamp']
 
     # --- ESTRATEGIA 1: LEADER MOMENTUM (Scalping Rápido) ---
-    # CAMBIO: Lag reducido de 1.0 -> 0.2 para captar BTC/ETH moviendo el mercado.
-    # CAMBIO: Correlación reducida de 0.75 -> 0.70.
     if lag > 0.2 and corr > 0.70:
         strength = 'HIGH' if corr > 0.85 else 'MEDIUM'
         signals.append({
@@ -45,20 +49,17 @@ def detect_strategies(row):
         })
 
     # --- ESTRATEGIA 2: LAG CATCH-UP (Reversión / Lentos) ---
-    # CAMBIO: Lag negativo de -2.0 -> -1.5. 
-    # CAMBIO: Correlación bajada a 0.65. Muchos de tus datos tienen lag -13, esto debe entrar sí o sí.
     if lag < -1.5 and corr > 0.65:
         signals.append({
             'strategy': 'LAG_CATCHUP',
             'signal_strength': 'HIGH',
             'description': f"{leader} is lagging {abs(lag)}m behind group. Expect catch-up move.",
             'action_asset': 'FOLLOWERS', 
-            'trade_asset': leader, # Operar este activo que va lento
+            'trade_asset': leader, 
             'condition': 'Entry on Lag'
         })
 
     # --- ESTRATEGIA 3: INVERSE HEDGE (Correlación Negativa) ---
-    # CAMBIO: Umbral negativo de -0.70 -> -0.60.
     if "(-" in followers_str:
         pairs = followers_str.split(';')
         for p in pairs:
@@ -69,7 +70,6 @@ def detect_strategies(row):
                 val_str = clean_p.split('(')[1].replace(')', '')
                 val = float(val_str)
                 
-                # Umbral más permisivo para detectar coberturas
                 if val < -0.60:
                     signals.append({
                         'strategy': 'INVERSE_PAIR',
@@ -82,10 +82,8 @@ def detect_strategies(row):
             except:
                 continue
 
-    # --- ESTRATEGIA 4: HIGH CORRELATION CLUSTER (Cluster Masivo) ---
-    # NUEVA ESTRATEGIA: Si tienes muchos seguidores (>10) con correlación perfecta (1.0),
-    # como en tu caso de WIN/BAT/TFUEL, cualquier movimiento es señal crítica.
-    if followers_count >= 10 and corr > 0.95:
+    # --- ESTRATEGIA 4: CLUSTER BREAKOUT ---
+    if followers_count >= 10 and corr > 0.90:
         signals.append({
             'strategy': 'CLUSTER_BREAKOUT',
             'signal_strength': 'CRITICAL',
@@ -95,8 +93,7 @@ def detect_strategies(row):
             'condition': 'Cluster Move'
         })
         
-    # --- ESTRATEGIA 5: MARKET DRIVER (Tendencia General) ---
-    # CAMBIO: Correlación bajada a 0.70.
+    # --- ESTRATEGIA 5: MARKET DRIVER ---
     elif followers_count >= 5 and corr > 0.70:
         signals.append({
             'strategy': 'MARKET_DRIVER',
@@ -119,10 +116,12 @@ def detect_strategies(row):
         })
         final_output.append(s)
         
-    return final_outpu
+    return final_output
 
 def process_signals(df):
-    # Tomamos solo el último snapshot de tiempo disponible en el CSV
+    if df.empty: return pd.DataFrame()
+    
+    # Tomamos solo el último snapshot de tiempo disponible
     last_timestamp = df['timestamp'].iloc[-1]
     current_market_state = df[df['timestamp'] == last_timestamp]
     
@@ -144,8 +143,8 @@ def update_signals_csv(new_signals_df):
         obj = s3.get_object(Bucket=SIGNALS_BUCKET, Key=CSV_OUTPUT_NAME)
         existing_df = pd.read_csv(obj['Body'])
         combined_df = pd.concat([existing_df, new_signals_df], ignore_index=True)
-    except Exception as e:
-        print(f"Archivo nuevo o error leyendo: {e}. Creando desde cero.")
+    except Exception:
+        print("Creando archivo de señales desde cero.")
         combined_df = new_signals_df
 
     csv_buffer = StringIO()
@@ -159,24 +158,48 @@ def update_signals_csv(new_signals_df):
     print(f"¡Éxito! {len(new_signals_df)} nuevas señales guardadas.")
 
 def handler(event, context):
-    print("--- INICIANDO ANÁLISIS DE SEÑALES (MODO PERMISIVO) ---")
+    print("--- INICIANDO ANÁLISIS DE SEÑALES (ROBUST MODE) ---")
+    
+    # --- SOLUCIÓN AL KEYERROR: Detección inteligente del origen ---
+    src_bucket = INPUT_BUCKET
+    src_key = DEFAULT_INPUT_KEY
     
     try:
-        record = event['Records'][0]
-        src_bucket = record['s3']['bucket']['name']
-        src_key = record['s3']['object']['key']
-        
+        # Intentamos ver si viene de un evento S3 real
+        if 'Records' in event and len(event['Records']) > 0:
+            if 's3' in event['Records'][0]:
+                print("Evento S3 detectado.")
+                src_bucket = event['Records'][0]['s3']['bucket']['name']
+                src_key = event['Records'][0]['s3']['object']['key']
+        else:
+            print("⚠️ No es un evento S3. Usando configuración por defecto (Variables de Entorno).")
+    except Exception as e:
+        print(f"Advertencia analizando evento: {e}. Usando defaults.")
+
+    print(f"Procesando Bucket: {src_bucket}, Key: {src_key}")
+
+    try:
+        # 1. Leer datos
         df_history = get_latest_data(src_bucket, src_key)
+        
+        if df_history.empty:
+            print("El CSV de entrada está vacío o no existe.")
+            return {"statusCode": 404, "body": "Input CSV empty"}
+
+        # 2. Procesar estrategias
         signals_df = process_signals(df_history)
         
+        # 3. Guardar resultados
         if not signals_df.empty:
-            print(f"Señales generadas:\n{signals_df[['strategy', 'leader_symbol', 'action_asset']].head()}")
+            # Imprimir una muestra para los logs de CloudWatch
+            print(f"Muestra de señales:\n{signals_df[['strategy', 'leader_symbol', 'action_asset']].head(3)}")
             update_signals_csv(signals_df)
         else:
-            print("Mercado sin anomalías detectables (incluso con filtros bajos).")
+            print("Análisis completado: Sin señales nuevas.")
             
     except Exception as e:
-        print(f"ERROR FATAL: {e}")
-        raise e
+        print(f"ERROR FATAL EN EJECUCIÓN: {e}")
+        # No lanzamos raise para que el lambda no reintente infinitamente si es un error de lógica
+        return {"statusCode": 500, "body": str(e)}
         
-    return {"statusCode": 200, "body": "Permissive Analysis Complete"}
+    return {"statusCode": 200, "body": "Signals Processed Successfully"}
