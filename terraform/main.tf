@@ -315,3 +315,52 @@ resource "aws_s3_bucket" "signals_bucket" {
   bucket = "crypto-trading-signals-2026-output" 
 }
 
+# --- NUEVO: BUCKET PARA SEÑALES ---
+resource "aws_s3_bucket" "signals_bucket" {
+  bucket_prefix = "crypto-trading-signals-"
+}
+
+# --- NUEVO: LAMBDA DE SEÑALES ---
+resource "aws_lambda_function" "signaler" {
+  function_name = "crypto-signaler"
+  role          = aws_iam_role.lambda_exec.arn # Reusamos el rol por simplicidad (idealmente crear uno nuevo)
+  package_type  = "Image"
+  image_uri     = "${aws_ecr_repository.repo.repository_url}:latest" # Misma imagen
+  timeout       = 60
+  memory_size   = 512
+
+  # SOBREESCRIBIMOS EL COMANDO PARA USAR EL OTRO ARCHIVO
+  image_config {
+    command = ["signals.handler"]
+  }
+
+  environment {
+    variables = {
+      SIGNALS_BUCKET = aws_s3_bucket.signals_bucket.id
+      INPUT_BUCKET   = aws_s3_bucket.data_bucket.id
+    }
+  }
+}
+
+# --- NUEVO: TRIGGER S3 (Event Notification) ---
+# Esto conecta el Bucket de Datos -> Lambda de Señales
+resource "aws_lambda_permission" "allow_s3" {
+  statement_id  = "AllowExecutionFromS3"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.signaler.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.data_bucket.arn
+}
+
+resource "aws_s3_bucket_notification" "bucket_notification" {
+  bucket = aws_s3_bucket.data_bucket.id
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.signaler.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "output/"                   # Solo si cambia algo en la carpeta output
+    filter_suffix       = "market_leaders_history.csv" # Específicamente este archivo
+  }
+
+  depends_on = [aws_lambda_permission.allow_s3]
+}
