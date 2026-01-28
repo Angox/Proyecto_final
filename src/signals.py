@@ -19,7 +19,7 @@ def get_latest_data(bucket, key):
 def detect_strategies(row):
     """
     Analiza una fila de datos y devuelve una lista de señales detectadas.
-    VERSION PERMISIVA: Umbrales reducidos para captar más movimientos.
+    VERSIÓN PERMISIVA: Umbrales reducidos para garantizar señales.
     """
     signals = []
     
@@ -30,69 +30,84 @@ def detect_strategies(row):
     followers_str = row['followers_list']
     timestamp = row['timestamp']
 
-    # --- ESTRATEGIA 1: LEADER MOMENTUM ---
-    # CAMBIO: Lag > 0.5 (antes 1.0) y Corr > 0.60 (antes 0.75)
-    # Riesgo: Puede dar señales en movimientos pequeños o menos claros.
-    if lag > 0.5 and corr > 0.60:
+    # --- ESTRATEGIA 1: LEADER MOMENTUM (Scalping Rápido) ---
+    # CAMBIO: Lag reducido de 1.0 -> 0.2 para captar BTC/ETH moviendo el mercado.
+    # CAMBIO: Correlación reducida de 0.75 -> 0.70.
+    if lag > 0.2 and corr > 0.70:
+        strength = 'HIGH' if corr > 0.85 else 'MEDIUM'
         signals.append({
             'strategy': 'LEADER_MOMENTUM',
-            'signal_strength': 'HIGH' if corr > 0.80 else 'MEDIUM',
-            'description': f"Leader {leader} moves {lag}m ahead (Permissive Mode). Watch followers.",
-            'action_asset': leader, 
+            'signal_strength': strength,
+            'description': f"Leader {leader} moves {lag}m ahead (Corr: {corr:.2f}). Scalp followers.",
+            'action_asset': leader,
             'trade_asset': 'FOLLOWERS', 
-            'condition': 'Wait for Leader Breakout'
+            'condition': 'Quick Scalp / Breakout'
         })
 
-    # --- ESTRATEGIA 2: LAG CATCH-UP (Reversión / Retraso) ---
-    # CAMBIO: Lag < -1.0 (antes -2.0) y Corr > 0.70 (antes 0.80)
-    # Riesgo: Entrar en activos que simplemente son lentos, no necesariamente retrasados.
-    if lag < -1.0 and corr > 0.70:
+    # --- ESTRATEGIA 2: LAG CATCH-UP (Reversión / Lentos) ---
+    # CAMBIO: Lag negativo de -2.0 -> -1.5. 
+    # CAMBIO: Correlación bajada a 0.65. Muchos de tus datos tienen lag -13, esto debe entrar sí o sí.
+    if lag < -1.5 and corr > 0.65:
         signals.append({
             'strategy': 'LAG_CATCHUP',
-            'signal_strength': 'MEDIUM',
-            'description': f"{leader} is lagging {abs(lag)}m behind. Catch-up potential.",
+            'signal_strength': 'HIGH',
+            'description': f"{leader} is lagging {abs(lag)}m behind group. Expect catch-up move.",
             'action_asset': 'FOLLOWERS', 
-            'trade_asset': leader, 
-            'condition': 'Immediate Entry if Divergence'
+            'trade_asset': leader, # Operar este activo que va lento
+            'condition': 'Entry on Lag'
         })
 
     # --- ESTRATEGIA 3: INVERSE HEDGE (Correlación Negativa) ---
-    # CAMBIO: Detecta desde -0.50 (antes -0.70)
-    if "(-" in followers_str: 
+    # CAMBIO: Umbral negativo de -0.70 -> -0.60.
+    if "(-" in followers_str:
         pairs = followers_str.split(';')
         for p in pairs:
             try:
                 clean_p = p.strip()
+                if '(' not in clean_p: continue
                 symbol = clean_p.split('(')[0]
                 val_str = clean_p.split('(')[1].replace(')', '')
                 val = float(val_str)
                 
-                # Umbral más relajado para correlación inversa
-                if val < -0.50:
+                # Umbral más permisivo para detectar coberturas
+                if val < -0.60:
                     signals.append({
                         'strategy': 'INVERSE_PAIR',
-                        'signal_strength': 'LOW' if val > -0.7 else 'MEDIUM',
-                        'description': f"{leader} moves OPPOSITE to {symbol} (Corr: {val}).",
+                        'signal_strength': 'MEDIUM',
+                        'description': f"{leader} vs {symbol} inverse correlation ({val}). Hedge opportunity.",
                         'action_asset': leader,
                         'trade_asset': symbol,
-                        'condition': 'Trade Opposite Direction'
+                        'condition': 'Trade Opposite'
                     })
             except:
                 continue
 
-    # --- ESTRATEGIA 4: MARKET DRIVER (Sentimiento General) ---
-    # CAMBIO: Solo 3 seguidores requeridos (antes 5) y Corr > 0.70
-    if followers_count >= 3 and corr > 0.70:
+    # --- ESTRATEGIA 4: HIGH CORRELATION CLUSTER (Cluster Masivo) ---
+    # NUEVA ESTRATEGIA: Si tienes muchos seguidores (>10) con correlación perfecta (1.0),
+    # como en tu caso de WIN/BAT/TFUEL, cualquier movimiento es señal crítica.
+    if followers_count >= 10 and corr > 0.95:
+        signals.append({
+            'strategy': 'CLUSTER_BREAKOUT',
+            'signal_strength': 'CRITICAL',
+            'description': f"{leader} is part of a massive sync cluster ({followers_count} assets).",
+            'action_asset': leader,
+            'trade_asset': 'ANY_IN_CLUSTER',
+            'condition': 'Cluster Move'
+        })
+        
+    # --- ESTRATEGIA 5: MARKET DRIVER (Tendencia General) ---
+    # CAMBIO: Correlación bajada a 0.70.
+    elif followers_count >= 5 and corr > 0.70:
         signals.append({
             'strategy': 'MARKET_DRIVER',
             'signal_strength': 'HIGH',
-            'description': f"{leader} is driving a cluster of {followers_count} assets.",
+            'description': f"{leader} driving market sentiment ({followers_count} pairs).",
             'action_asset': leader,
-            'trade_asset': 'ALL_MARKET',
+            'trade_asset': 'MARKET_ETFs',
             'condition': 'Trend Confirmation'
         })
 
-    # Formatear salida común
+    # Formatear salida
     final_output = []
     for s in signals:
         s.update({
@@ -104,7 +119,7 @@ def detect_strategies(row):
         })
         final_output.append(s)
         
-    return final_output
+    return final_outpu
 
 def process_signals(df):
     # Tomamos solo el último snapshot de tiempo disponible en el CSV
