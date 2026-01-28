@@ -28,7 +28,7 @@ def get_binance_data():
         return pd.DataFrame()
 
     symbols = [s for s in markets if s.endswith('/USDC')]
-    selected_symbols = symbols[:15] 
+    selected_symbols = symbols[:50] 
     
     data = {}
     print(f"Descargando datos para: {selected_symbols}")
