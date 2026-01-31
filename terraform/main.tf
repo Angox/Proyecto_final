@@ -192,7 +192,7 @@ resource "aws_lambda_function" "analyzer" {
 resource "aws_cloudwatch_event_rule" "every_5_minutes" {
   name                = "crypto-every-5-minutes"
   description         = "Ejecuta el analisis de cripto cada 5 minutos"
-  schedule_expression = "rate(5 minutes)"
+  schedule_expression = "rate(6 hours)"
 }
 
 # 2. El Objetivo: Conectamos la regla con la Lambda
